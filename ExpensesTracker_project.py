@@ -260,5 +260,4 @@ def main():
     Application_GUI()
     data_Base.close()
 
-if __name__ == "__main__":
-    main()
+main()
