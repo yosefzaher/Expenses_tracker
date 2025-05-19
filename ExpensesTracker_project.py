@@ -4,6 +4,9 @@ from tkcalendar import DateEntry
 import sqlite3
 import requests
 import json
+import os
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 
 class Database:
@@ -13,7 +16,7 @@ class Database:
         self.curser = self.data_base.cursor()
 
         self.curser.execute("""CREATE TABLE IF NOT EXISTS Expenses_Tracker(
-            Amount INTEGER, 
+            Amount DECIMAL(10,2), 
             Currency STRING,
             Category STRING,
             Date STRING,
@@ -21,36 +24,62 @@ class Database:
         )""")
 
     def add(self, amount, currency, category, date, payment_method):
-        self.curser.execute(f"""INSERT INTO Expenses_Tracker(Amount, Currency, Category, Date, Payment_Method)
-                VALUES (?, ?, ?, ?, ?)""", (amount, currency, category, date, payment_method))
-        self.commit()
+        try:
+            amount = Decimal(amount)
+            if amount <= 0:
+                raise ValueError("Amount must be positive")
+            self.curser.execute(f"""INSERT INTO Expenses_Tracker(Amount, Currency, Category, Date, Payment_Method)
+                    VALUES (?, ?, ?, ?, ?)""", (str(amount), currency, category, date, payment_method))
+            self.commit()
+            return True, None
+        except (InvalidOperation, ValueError) as e:
+            return False, str(e)
+        except Exception as e:
+            return False, f"Error adding expense: {str(e)}"
 
     def get_all_expenses(self):
         self.curser.execute("SELECT * FROM Expenses_Tracker")
         return self.curser.fetchall()
 
     def update(self, old, new):
-        self.curser.execute(f"""UPDATE Expenses_Tracker SET Amount=?, Currency=?, Category=?, Date=?, Payment_Method=?
-                WHERE Amount=? AND Currency=? AND Category=? AND Date=? AND Payment_Method=?""",
-                (new[0], new[1], new[2], new[3], new[4], old[0], old[1], old[2], old[3], old[4]))
-        self.commit()
+        try:
+            amount = Decimal(new[0])
+            if amount <= 0:
+                raise ValueError("Amount must be positive")
+            self.curser.execute(f"""UPDATE Expenses_Tracker SET Amount=?, Currency=?, Category=?, Date=?, Payment_Method=?
+                    WHERE Amount=? AND Currency=? AND Category=? AND Date=? AND Payment_Method=?""",
+                    (str(amount), new[1], new[2], new[3], new[4], old[0], old[1], old[2], old[3], old[4]))
+            self.commit()
+            return True, None
+        except (InvalidOperation, ValueError) as e:
+            return False, str(e)
+        except Exception as e:
+            return False, f"Error updating expense: {str(e)}"
 
     def delete(self, old):
-        self.curser.execute("""DELETE FROM Expenses_Tracker WHERE Amount=? AND Currency=? AND
-                Category=? AND Date=? AND Payment_Method=?""", (old[0], old[1], old[2], old[3], old[4]))
-        self.commit()
+        try:
+            self.curser.execute("""DELETE FROM Expenses_Tracker WHERE Amount=? AND Currency=? AND
+                    Category=? AND Date=? AND Payment_Method=?""", (old[0], old[1], old[2], old[3], old[4]))
+            self.commit()
+            return True, None
+        except Exception as e:
+            return False, f"Error deleting expense: {str(e)}"
 
     def delete_all(self):
-        self.curser.execute("DELETE FROM Expenses_Tracker")
-        self.commit()
-        update_treeview()
+        try:
+            self.curser.execute("DELETE FROM Expenses_Tracker")
+            self.commit()
+            return True, None
+        except Exception as e:
+            return False, f"Error deleting all expenses: {str(e)}"
 
     def total(self):
-        sum = 0
-        self.curser.execute("SELECT SUM(Amount) FROM Expenses_Tracker ")
-        sum += int(self.curser.fetchone()[0])
-        self.commit()
-        return sum
+        try:
+            self.curser.execute("SELECT SUM(CAST(Amount AS DECIMAL(10,2))) FROM Expenses_Tracker")
+            result = self.curser.fetchone()[0]
+            return Decimal(result if result else 0)
+        except Exception:
+            return Decimal(0)
 
     def commit(self):
         self.data_base.commit()
@@ -58,24 +87,66 @@ class Database:
     def close(self):
         self.data_base.close()
 
+def validate_amount(amount_str):
+    try:
+        amount = Decimal(amount_str)
+        if amount <= 0:
+            return False, "Amount must be positive"
+        return True, None
+    except InvalidOperation:
+        return False, "Invalid amount format"
+
+def validate_date(date_str):
+    try:
+        datetime.strptime(date_str, '%m/%d/%y')
+        return True, None
+    except ValueError:
+        return False, "Invalid date format"
+
 def update_treeview():
     for item in app.expenses_data.get_children():
         app.expenses_data.delete(item)
 
     expenses = data_Base.get_all_expenses()
-
     for expense in expenses:
         app.expenses_data.insert("", "end", values=expense)
+    
+    # Update total label
+    total = data_Base.total()
+    app.total_label.config(text=f"Total Expenses: {total:.2f}")
 
 def add_expense():
-    amount = app.amount_entry.get()
+    amount = app.amount_entry.get().strip()
     currency = app.currency_combo.get()
     category = app.category_combo.get()
     date = app.date_datepicker.get()
     payment_method = app.payment_method_combo.get()
 
-    data_Base.add(amount, currency, category, date, payment_method)
-    update_treeview()
+    # Validate inputs
+    if not all([amount, currency, category, date, payment_method]):
+        messagebox.showerror("Error", "All fields are required")
+        return
+
+    valid, error = validate_amount(amount)
+    if not valid:
+        messagebox.showerror("Error", error)
+        return
+
+    valid, error = validate_date(date)
+    if not valid:
+        messagebox.showerror("Error", error)
+        return
+
+    success, error = data_Base.add(amount, currency, category, date, payment_method)
+    if success:
+        update_treeview()
+        # Clear inputs
+        app.amount_entry.delete(0, END)
+        app.currency_combo.set('')
+        app.category_combo.set('')
+        app.payment_method_combo.set('')
+    else:
+        messagebox.showerror("Error", error)
 
 def delete_expense():
     selected_item = app.expenses_data.selection()
@@ -83,9 +154,13 @@ def delete_expense():
         messagebox.showinfo("Error", "Please select an expense to delete.")
         return
 
-    values = app.expenses_data.item(selected_item, 'values')
-    data_Base.delete(values)
-    update_treeview()
+    if messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this expense?"):
+        values = app.expenses_data.item(selected_item, 'values')
+        success, error = data_Base.delete(values)
+        if success:
+            update_treeview()
+        else:
+            messagebox.showerror("Error", error)
 
 def update_expense_window():
     selected_item = app.expenses_data.selection()
@@ -93,20 +168,37 @@ def update_expense_window():
         messagebox.showinfo("Error", "Please select an expense to update.")
         return
 
-  
     old_values = app.expenses_data.item(selected_item, 'values')
-
 
     update_window = Toplevel(app)
     update_window.title("Update Expense")
+    update_window.geometry("400x300")
+    update_window.configure(background='#fafad2')
 
+    # Center the window
+    update_window.transient(app)
+    update_window.grab_set()
+    
+    # Create and pack widgets with proper spacing
+    frame = Frame(update_window, bg='#fafad2', padx=20, pady=20)
+    frame.pack(fill=BOTH, expand=True)
 
-    update_amount = Entry(update_window)
-    update_currency = ttk.Combobox(update_window, values=['USD', 'EUR', 'JPY', 'GBP', 'AUD', 'CAD', 'CHF', 'CNY', 'SEK', 'NZD', 'NOK', 'INR', 'BRL', 'ZAR', 'MXN', 'EGP'])
-    update_category = ttk.Combobox(update_window, values=['Life Expenses', 'Electricity Bill', 'Gas Bill', 'Rental', 'Grocery', 'Savings', 'Education', 'Charity'])
-    update_date = DateEntry(update_window)
-    update_payment_method = ttk.Combobox(update_window, values=['Credit Card', 'Debit Card', 'Transfer', 'Paypal', 'Cash'])
+    labels = ["Amount:", "Currency:", "Category:", "Date:", "Payment Method:"]
+    entries = []
+    
+    for i, label_text in enumerate(labels):
+        Label(frame, text=label_text, bg='#fafad2').grid(row=i, column=0, pady=5, sticky=W)
+    
+    update_amount = Entry(frame)
+    update_currency = ttk.Combobox(frame, values=['USD', 'EUR', 'JPY', 'GBP', 'AUD', 'CAD', 'CHF', 'CNY', 'SEK', 'NZD', 'NOK', 'INR', 'BRL', 'ZAR', 'MXN', 'EGP'])
+    update_category = ttk.Combobox(frame, values=['Life Expenses', 'Electricity Bill', 'Gas Bill', 'Rental', 'Grocery', 'Savings', 'Education', 'Charity'])
+    update_date = DateEntry(frame)
+    update_payment_method = ttk.Combobox(frame, values=['Credit Card', 'Debit Card', 'Transfer', 'Paypal', 'Cash'])
 
+    entries = [update_amount, update_currency, update_category, update_date, update_payment_method]
+    
+    for i, entry in enumerate(entries):
+        entry.grid(row=i, column=1, pady=5, padx=5, sticky=EW)
 
     update_amount.insert(0, old_values[0])
     update_currency.set(old_values[1])
@@ -114,150 +206,180 @@ def update_expense_window():
     update_date.set_date(old_values[3])
     update_payment_method.set(old_values[4])
 
+    Button(frame, text="Update Expense", 
+           command=lambda: update_expense_dataBase(old_values, update_amount, update_currency, 
+                                                 update_category, update_date, update_payment_method, update_window),
+           bg='#4CAF50', fg='white', pady=10).grid(row=5, columnspan=2, pady=20)
 
-    label_amount = Label(update_window, text="Amount:")
-    label_currency = Label(update_window, text="Currency:")
-    label_category = Label(update_window, text="Category:")
-    label_date = Label(update_window, text="Date:")
-    label_payment_method = Label(update_window, text="Payment Method:")
-
-
-    update_button = Button(update_window, text="Update Expense", command=lambda: update_expense_dataBase(old_values, update_amount, update_currency, update_category, update_date, update_payment_method))
-
-
-    label_amount.grid(row=0, column=0)
-    update_amount.grid(row=0, column=1)
-    label_currency.grid(row=1, column=0)
-    update_currency.grid(row=1, column=1)
-    label_category.grid(row=2, column=0)
-    update_category.grid(row=2, column=1)
-    label_date.grid(row=3, column=0)
-    update_date.grid(row=3, column=1)
-    label_payment_method.grid(row=4, column=0)
-    update_payment_method.grid(row=4, column=1)
-    update_button.grid(row=5, columnspan=2)
-
-def update_expense_dataBase(old_values, update_amount, update_currency, update_category, update_date, update_payment_method):
-
+def update_expense_dataBase(old_values, update_amount, update_currency, update_category, update_date, update_payment_method, window):
     new_values = [
-        update_amount.get(),
+        update_amount.get().strip(),
         update_currency.get(),
         update_category.get(),
         update_date.get(),
         update_payment_method.get()
     ]
 
+    # Validate inputs
+    if not all(new_values):
+        messagebox.showerror("Error", "All fields are required")
+        return
 
-    data_Base.update(old_values, new_values)
+    valid, error = validate_amount(new_values[0])
+    if not valid:
+        messagebox.showerror("Error", error)
+        return
 
+    valid, error = validate_date(new_values[3])
+    if not valid:
+        messagebox.showerror("Error", error)
+        return
 
-    update_treeview()
-
-import json
+    success, error = data_Base.update(old_values, new_values)
+    if success:
+        update_treeview()
+        window.destroy()
+    else:
+        messagebox.showerror("Error", error)
 
 def Calculate_all_theAmount_in_USD():
     all_data = data_Base.get_all_expenses()
-    payload = {}
-    headers = {
-        "apikey": "d6orT12AcBBuc0a8nkTNrLgVIIGYxuaQ"
-    }
-    total = 0
-    for i in range(len(all_data)):
-        url = f"https://api.apilayer.com/fixer/convert?to=USD&from={all_data[i][1]}&amount={all_data[i][0]}"
-        response = requests.request("GET", url, headers=headers, data=payload)
-        status_code = response.status_code
+    if not all_data:
+        messagebox.showinfo("Info", "No expenses to convert")
+        return
 
-    if status_code == 200:
-        result = json.loads(response.text)
-        total += float(result['result'])
-    else:
-        messagebox.showerror("Error", f"Request failed with status code {status_code}.")
+    API_KEY = "d6orT12AcBBuc0a8nkTNrLgVIIGYxuaQ"  # In production, this should be in environment variables
+    headers = {"apikey": API_KEY}
+    total = Decimal(0)
+    
+    try:
+        for expense in all_data:
+            if expense[1] == 'USD':
+                total += Decimal(expense[0])
+                continue
+                
+            url = f"https://api.apilayer.com/fixer/convert?to=USD&from={expense[1]}&amount={expense[0]}"
+            response = requests.request("GET", url, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                total += Decimal(str(result['result']))
+            else:
+                messagebox.showerror("Error", f"Failed to convert {expense[1]} to USD")
+                return
+        
+        messagebox.showinfo("Result", f"Total expenses in USD: ${total:.2f}")
+    except Exception as e:
+        messagebox.showerror("Error", f"Conversion failed: {str(e)}")
 
-    messagebox.showinfo("Result", f"The total expenses in USD = {total}$")
+def export_to_csv():
+    try:
+        import csv
+        from datetime import datetime
+        
+        filename = f"expenses_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        with open(filename, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["Amount", "Currency", "Category", "Date", "Payment Method"])
+            writer.writerows(data_Base.get_all_expenses())
+        
+        messagebox.showinfo("Success", f"Data exported to {filename}")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to export data: {str(e)}")
 
+def delete_all_expenses():
+    if not data_Base.get_all_expenses():
+        messagebox.showinfo("Info", "No expenses to delete")
+        return
+        
+    if messagebox.askyesno("Confirm Delete All", "Are you sure you want to delete all expenses? This action cannot be undone."):
+        success, error = data_Base.delete_all()
+        if success:
+            update_treeview()
+            messagebox.showinfo("Success", "All expenses have been deleted")
+        else:
+            messagebox.showerror("Error", error)
 
 def Application_GUI():
     global app
     app = Tk()
-    app.iconbitmap(r"D:\Front_end Dibloma\مسار أسس البرمجه\the final project of the path\cost.ico")
     app.title('Expense Tracker')
-    app.minsize(width=650, height=600)
-    app.maxsize(width=650, height=600)
-    app.geometry('650x700')
+    app.minsize(width=800, height=700)
+    app.maxsize(width=800, height=700)
+    app.geometry('800x700')
     app.configure(background='#fafad2')
 
-    app.expenses_data = ttk.Treeview(app, columns=("Amount", "Currency", "Category", "Date", "Payment_Method"))
+    # Try to set icon, fallback gracefully if not found
+    try:
+        icon_path = "cost.ico"
+        if os.path.exists(icon_path):
+            app.iconbitmap(icon_path)
+    except:
+        pass  # Ignore icon errors
+
+    # Main frame for input fields
+    input_frame = Frame(app, bg='#fafad2', padx=20, pady=20)
+    input_frame.pack(fill=X)
+
+    # Input fields
+    Label(input_frame, text="Amount:", bg='#fafad2').grid(row=0, column=0, pady=5, sticky=W)
+    app.amount_entry = Entry(input_frame)
+    app.amount_entry.grid(row=0, column=1, pady=5, padx=5)
+
+    Label(input_frame, text="Currency:", bg='#fafad2').grid(row=0, column=2, pady=5, sticky=W)
+    app.currency_combo = ttk.Combobox(input_frame, values=['USD', 'EUR', 'JPY', 'GBP', 'AUD', 'CAD', 'CHF', 'CNY', 'SEK', 'NZD', 'NOK', 'INR', 'BRL', 'ZAR', 'MXN', 'EGP'])
+    app.currency_combo.grid(row=0, column=3, pady=5, padx=5)
+
+    Label(input_frame, text="Category:", bg='#fafad2').grid(row=1, column=0, pady=5, sticky=W)
+    app.category_combo = ttk.Combobox(input_frame, values=['Life Expenses', 'Electricity Bill', 'Gas Bill', 'Rental', 'Grocery', 'Savings', 'Education', 'Charity'])
+    app.category_combo.grid(row=1, column=1, pady=5, padx=5)
+
+    Label(input_frame, text="Date:", bg='#fafad2').grid(row=1, column=2, pady=5, sticky=W)
+    app.date_datepicker = DateEntry(input_frame, date_pattern='mm/dd/yy')
+    app.date_datepicker.grid(row=1, column=3, pady=5, padx=5)
+
+    Label(input_frame, text="Payment Method:", bg='#fafad2').grid(row=2, column=0, pady=5, sticky=W)
+    app.payment_method_combo = ttk.Combobox(input_frame, values=['Credit Card', 'Debit Card', 'Transfer', 'Paypal', 'Cash'])
+    app.payment_method_combo.grid(row=2, column=1, pady=5, padx=5)
+
+    # Buttons frame
+    button_frame = Frame(app, bg='#fafad2', padx=20, pady=10)
+    button_frame.pack(fill=X)
+
+    Button(button_frame, text="Add Expense", command=add_expense, bg='#4CAF50', fg='white', pady=5).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Delete Expense", command=delete_expense, bg='#f44336', fg='white', pady=5).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Update Expense", command=update_expense_window, bg='#2196F3', fg='white', pady=5).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Delete All", command=delete_all_expenses, bg='#d32f2f', fg='white', pady=5).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Convert to USD", command=Calculate_all_theAmount_in_USD, bg='#FF9800', fg='white', pady=5).pack(side=LEFT, padx=5)
+    Button(button_frame, text="Export to CSV", command=export_to_csv, bg='#9C27B0', fg='white', pady=5).pack(side=LEFT, padx=5)
+
+    # Total expenses label
+    app.total_label = Label(app, text="Total Expenses: 0.00", bg='#fafad2', font=('Arial', 12, 'bold'))
+    app.total_label.pack(pady=10)
+
+    # Treeview
+    app.expenses_data = ttk.Treeview(app, columns=("Amount", "Currency", "Category", "Date", "Payment_Method"), height=15)
+    app.expenses_data.pack(padx=20, pady=10, fill=BOTH, expand=True)
+
+    # Configure treeview
+    app.expenses_data.column("#0", width=0, stretch=NO)
+    for col in ("Amount", "Currency", "Category", "Date", "Payment_Method"):
+        app.expenses_data.column(col, width=150, minwidth=150)
+        app.expenses_data.heading(col, text=col.replace("_", " "), anchor=W)
+
+    # Add scrollbar
+    scrollbar = ttk.Scrollbar(app, orient=VERTICAL, command=app.expenses_data.yview)
+    scrollbar.pack(side=RIGHT, fill=Y)
+    app.expenses_data.configure(yscrollcommand=scrollbar.set)
+
     update_treeview()
-
-    app.expenses_data.column("#0", width=0, stretch=0)
-    app.expenses_data.column("Amount", width=120, minwidth=60, anchor=W)
-    app.expenses_data.column("Currency", width=120, minwidth=60, anchor=W)
-    app.expenses_data.column("Category", width=120, minwidth=60, anchor=W)
-    app.expenses_data.column("Date", width=120, minwidth=80, anchor=W)
-    app.expenses_data.column("Payment_Method", width=120, minwidth=60, anchor=W)
-
-    app.expenses_data.heading("Amount", text="Amount", anchor=W)
-    app.expenses_data.heading("Currency", text="Currency", anchor=W)
-    app.expenses_data.heading("Category", text="Category", anchor=W)
-    app.expenses_data.heading("Date", text="Date", anchor=W)
-    app.expenses_data.heading("Payment_Method", text="Payment_Method", anchor=W)
-
-    app.expenses_data.pack()
-
-    LabelFrame = Frame(app, bg='#fafad2')
-
-    amount_label = Label(LabelFrame, text="Amount:", bg='#fafad2', font=('Helvetica', 17))
-    currency_label = Label(LabelFrame, text="Currency:", bg='#fafad2', font=('Helvetica', 17))
-    category_label = Label(LabelFrame, text="Category:", bg='#fafad2', font=('Helvetica', 17))
-    date_label = Label(LabelFrame, text="Date:", bg='#fafad2', font=('Helvetica', 17))
-    payment_method_label = Label(LabelFrame, text="Payment Method:", bg='#fafad2', font=('Helvetica', 17))
-
-    width_ = 15
-
-    app.amount_entry = Entry(LabelFrame, width=18)
-    currencies = ['USD', 'EUR', 'JPY', 'GBP', 'AUD', 'CAD', 'CHF', 'CNY', 'SEK', 'NZD', 'NOK', 'INR', 'BRL', 'ZAR', 'MXN', 'EGP']
-    app.currency_combo = ttk.Combobox(LabelFrame, values=currencies, width=width_)
-    expense_categories = ['Life Expenses', 'Electricity Bill', 'Gas Bill', 'Rental', 'Grocery', 'Savings', 'Education', 'Charity']
-    app.category_combo = ttk.Combobox(LabelFrame, values=expense_categories, width=width_)
-    app.date_datepicker = DateEntry(LabelFrame, width=width_)
-    payment_methods = ['Credit Card', 'Debit Card', 'Transfer', 'Paypal', 'Cash']
-    app.payment_method_combo = ttk.Combobox(LabelFrame, values=payment_methods, width=width_)
-
-    amount_label.grid(row=0, column=1)
-    currency_label.grid(row=1, column=1)
-    category_label.grid(row=2, column=1)
-    date_label.grid(row=3, column=1)
-    payment_method_label.grid(row=4, column=1)
-    app.amount_entry.grid(row=0, column=2)
-    app.currency_combo.grid(row=1, column=2)
-    app.category_combo.grid(row=2, column=2)
-    app.date_datepicker.grid(row=3, column=2)
-    app.payment_method_combo.grid(row=4, column=2)
-
-    LabelFrame.pack()
-
-    buttonFrame = Frame(app, background='#fafad2')
-
-    add_button = Button(buttonFrame, text="Add Expense", width=15, height=1, command=add_expense)
-    delete_button = Button(buttonFrame, text="Delete Expense", width=15, height=1, command=delete_expense)
-    update_button = Button(buttonFrame, text="Update an Expense", width=15, height=1, command=update_expense_window)
-    deleteAll_button = Button(buttonFrame, text="Delete All Expenses", width=15, height=1, command=data_Base.delete_all)
-    all_in_USD_button =  Button(buttonFrame, text="ALL in USD", width=15, height=1, command=Calculate_all_theAmount_in_USD)
-
-    add_button.grid(row=3, column=0, padx=10, pady=10)
-    delete_button.grid(row=4, column=0, padx=10, pady=10)
-    update_button.grid(row=5, column=0, padx=10, pady=10)
-    deleteAll_button.grid(row=6, column=0, padx=10, pady=10)
-    all_in_USD_button.grid(row=7, column=0, padx=10, pady=10)
-
-    buttonFrame.pack(side="top")
-
-    app.mainloop()
 
 def main():
     global data_Base
-    data_Base = Database(r"""D:\Front_end Dibloma\مسار أسس البرمجه\the final project of the path\Expenses.db""")
+    data_Base = Database("Expenses.db")
     Application_GUI()
+    app.mainloop()
     data_Base.close()
 
-main()
+if __name__ == "__main__":
+    main()
